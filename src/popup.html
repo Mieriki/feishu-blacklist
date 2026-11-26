@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>飞书手动黑名单</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>手动黑名单</h1>
+      <p class="sub">屏蔽的人在任意群里都不会再出现在你的视野里。</p>
+    </header>
+
+    <section class="pick">
+      <button type="button" id="pick">拾取要屏蔽的人</button>
+      <p class="pick-hint">点击后回到飞书，点任意一条消息或回复即可屏蔽它的作者。</p>
+    </section>
+
+    <section class="mode">
+      <div class="mode-label">被屏蔽消息的显示方式</div>
+      <div class="seg">
+        <button type="button" data-mode="placeholder">划线占位</button>
+        <button type="button" data-mode="hide">完全隐藏</button>
+      </div>
+    </section>
+
+    <section class="list-head">
+      <span>已屏蔽 <b id="count">0</b> 人</span>
+      <span class="tip" id="status"></span>
+    </section>
+
+    <ul id="list"></ul>
+
+    <div id="empty" class="empty">
+      <div class="empty-icon">🫥</div>
+      <p>还没有屏蔽任何人</p>
+      <p class="empty-sub">点上面的「拾取要屏蔽的人」，回到飞书点一条消息即可</p>
+    </div>
+  </body>
+  <script src="popup.js"></script>
+</html>
