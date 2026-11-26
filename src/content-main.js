@@ -17,7 +17,7 @@
   let pickMode = false;
 
   const STYLE_ID = 'fblk-style';
-  const STYLE_VERSION = '4';
+  const STYLE_VERSION = '6';
 
   function injectStyle() {
     const existing = document.getElementById(STYLE_ID);
@@ -35,16 +35,18 @@
       '.fblk-bar a{color:#8fb4ff;cursor:pointer;text-decoration:none;}',
       '.fblk-bar a:hover{text-decoration:underline;}',
       'body.fblk-picking .threadMsgAuthorName,',
-      'body.fblk-picking .threadReplaysItem-author-name{',
+      'body.fblk-picking .threadReplaysItem-author-name,',
+      'body.fblk-picking .groupMsgAuthorName{',
       'text-decoration:underline;text-decoration-color:#3370ff;text-decoration-thickness:2px;',
       'text-underline-offset:3px;cursor:pointer;}',
       'body.fblk-picking .threadMsgContentWrapper,',
-      'body.fblk-picking .threadReplaysItem{cursor:pointer;}',
+      'body.fblk-picking .threadReplaysItem,',
+      'body.fblk-picking .groupMsgWrap{cursor:pointer;}',
       '.fblk-ph{display:flex;align-items:center;gap:8px;margin:2px 0 2px 44px;padding:2px 10px;',
       'border-left:2px solid #c9cdd3;color:#8f959e;font-size:12px;line-height:20px;',
       'font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;user-select:none;}',
       '.fblk-ph-actions{display:flex;gap:10px;}',
-      '.fblk-link{color:#8f959e;cursor:pointer;text-decoration:none;}',
+      '.fblk-link{color:#8f959e;cursor:pointer;text-decoration:none;transition:color .15s;}',
       '.fblk-link:hover{color:#3370ff;text-decoration:underline;}',
       '.fblk-toast{position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;',
       'display:flex;align-items:center;gap:12px;padding:8px 14px;border-radius:8px;',
@@ -56,8 +58,10 @@
       '.fblk-panel-mask{position:absolute;inset:0;z-index:2;display:flex;align-items:center;gap:8px;',
       'padding:0 14px;background:#f7f8fa;border-left:2px solid #c9cdd3;color:#8f959e;',
       'font-size:12px;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;',
-      'user-select:none;cursor:pointer;}',
-      '.fblk-panel-mask:hover{color:#3370ff;}'
+      'user-select:none;cursor:pointer;transition:background-color .15s,color .15s;}',
+      '.fblk-panel-mask:hover{background:#eef2f8;color:#3370ff;}',
+      '.fblk-panel-hint{color:#b0b4ba;transition:color .15s;}',
+      '.fblk-panel-mask:hover .fblk-panel-hint{color:#3370ff;text-decoration:underline;}'
     ].join('');
     (document.head || document.documentElement).appendChild(style);
   }
@@ -80,6 +84,8 @@
     push(author.name);
     push(author.nameWithAnotherName);
     push(author.enUsName);
+    push(author.zhCnName);
+    push(author.chatExtra && author.chatExtra.nickName);
     return {
       id: String(author.id),
       name: author.localizedName || author.name || '',
@@ -113,6 +119,31 @@
     const info = authorOfElement(msgEl, false);
     // 只缓存成功结果：fiber 可能稍后才挂上，缓空值会让该条消息永久失效
     if (msgId && info) infoCache.set(msgId, info);
+    return info;
+  }
+
+  // 帖子详情面板（右侧 .groupMsgWrap，根帖与回复同构）。
+  // 实测 messageItem 就在第 1 层 fiber 上，这里只走 4 层：楼层一多容易把回复的点击
+  // 归到外层根帖的作者，而屏蔽错人比点不动更糟。
+  function authorOfPanelRow(el) {
+    let fiber = fiberOf(el);
+    for (let depth = 0; depth < 4 && fiber; depth++) {
+      const props = fiber.memoizedProps;
+      if (props) {
+        const found = authorFromItem(props.messageItem);
+        if (found) return found;
+      }
+      fiber = fiber.return;
+    }
+    return null;
+  }
+
+  // 界面显示名才是用户认得的名字（Tanker 的 localizedName 是 Y），
+  // 统一并进别名，既能修好提示文案，也能让名字兜底命中。
+  function mergeDomName(info, dom) {
+    if (!info || !dom) return info;
+    if (info.aliases.indexOf(dom) === -1) info.aliases.push(dom);
+    if (!info.name || info.name !== dom) info.name = dom;
     return info;
   }
 
@@ -201,7 +232,9 @@
     }
 
     const text = ph.querySelector('.fblk-ph-text');
-    if (text) text.textContent = '已屏蔽 ' + name + ' 的消息';
+    const next = '已屏蔽 ' + name + ' 的消息';
+    // 无条件赋值会重建文本节点，触发自身的 MutationObserver 空转
+    if (text && text.textContent !== next) text.textContent = next;
   }
 
   function syncRow(row) {
@@ -348,32 +381,49 @@
     if (right) right.style.removeProperty('visibility');
   }
 
-  function applyPanelMask(el, name) {    const right = el.querySelector('.groupMsgRightWrap');
+  function applyPanelMask(el, name) {
+    const right = el.querySelector('.groupMsgRightWrap');
     if (!right) return false;
     const cs = getComputedStyle(el);
     if (cs.position === 'static') el.style.position = 'relative';
     right.style.visibility = 'hidden';
 
     let mask = el.querySelector('.fblk-panel-mask');
+    let label = mask ? mask.querySelector('.fblk-panel-label') : null;
+
+    // 遮罩可能在旧版本里创建过（扩展重载后 DOM 里还留着）。
+    // 这种遮罩没有 label 结构，重建一次，之后就一直复用。
+    if (mask && !label) {
+      mask.remove();
+      mask = null;
+    }
+
     if (!mask) {
       mask = document.createElement('div');
       mask.className = 'fblk-panel-mask';
-      mask.addEventListener('click', function (ev) {
+      // 用 pointerdown 而不是 click：虚拟列表在交互期间可能重排，
+      // click 要求 down/up 落在同一节点，节点一换就整个丢掉。
+      mask.addEventListener('pointerdown', function (ev) {
+        if (ev.button !== 0) return;
         ev.preventDefault();
         ev.stopPropagation();
         el.setAttribute('data-fblk-expanded', '1');
         clearPanelRow(el);
       });
+      label = document.createElement('span');
+      label.className = 'fblk-panel-label';
+      const hint = document.createElement('span');
+      hint.className = 'fblk-panel-hint';
+      hint.textContent = '· 点击查看';
+      mask.appendChild(label);
+      mask.appendChild(hint);
       el.appendChild(mask);
     }
-    mask.textContent = '';
-    const label = document.createElement('span');
-    label.textContent = '已屏蔽 ' + name + ' 的回复';
-    const hint = document.createElement('span');
-    hint.textContent = '· 点击查看';
-    hint.style.color = '#b0b4ba';
-    mask.appendChild(label);
-    mask.appendChild(hint);
+
+    // 只在文案真的变了才写：每轮无条件重建文本节点会触发自身的
+    // MutationObserver，形成同步死循环，还会把按下中的节点换掉。
+    const text = '已屏蔽 ' + name + ' 的回复';
+    if (label.textContent !== text) label.textContent = text;
     return true;
   }
 
@@ -436,7 +486,7 @@
     barEl = document.createElement('div');
     barEl.className = 'fblk-bar';
     barEl.innerHTML =
-      '<span>点击某条消息或回复，屏蔽它的作者</span>' +
+      '<span>点击某条消息、回复或帖子内容，屏蔽它的作者</span>' +
       '<a class="fblk-cancel">取消 (Esc)</a>';
     barEl.querySelector('.fblk-cancel').addEventListener('click', function (ev) {
       ev.preventDefault();
@@ -469,8 +519,9 @@
     if (target.closest('.fblk-bar, .fblk-toast, .fblk-ph')) return;
 
     const replayEl = target.closest('.threadReplaysItem');
+    const panelRow = target.closest(PANEL_ROW_SELECTOR);
     const msgEl = target.closest(MSG_SELECTOR);
-    if (!replayEl && !msgEl) return;
+    if (!replayEl && !panelRow && !msgEl) return;
 
     ev.preventDefault();
     ev.stopPropagation();
@@ -478,26 +529,21 @@
 
     let info = null;
     if (replayEl) {
-      info = authorOfElement(replayEl, true);
-      if (info && !info.aliases.length) {
-        const dom = replayDomName(replayEl);
-        if (dom) info.aliases.push(dom);
-      }
-      if (!info) {
-        const dom = replayDomName(replayEl);
-        if (dom) info = { id: '', name: dom, aliases: [dom], isMine: false };
-      }
+      info = mergeDomName(authorOfElement(replayEl, true), replayDomName(replayEl));
+    } else if (panelRow) {
+      info = mergeDomName(authorOfPanelRow(panelRow), panelAuthorName(panelRow));
     } else {
       const row = msgEl.closest(ROW_SELECTOR) || msgEl;
-      info = getMsgInfo(msgEl);
-      if (info && !info.aliases.length) {
-        const dom = domAuthorName(row);
-        if (dom) info.aliases.push(dom);
-      }
+      info = mergeDomName(getMsgInfo(msgEl), domAuthorName(row));
     }
 
-    if (!info || info.isMine) {
-      exitPickMode();
+    if (info && info.isMine) {
+      showToast('这是你自己的消息', '');
+      return;
+    }
+
+    if (!info) {
+      showToast('这条消息读不到发送人，换一条试试', '');
       return;
     }
 
@@ -596,13 +642,23 @@
     }
   });
 
+  // 我们自己的节点（占位、遮罩、顶部条、toast）内部的变化不该触发重新同步，
+  // 否则每次写文案都会绕回来再写一次，变成死循环。
+  const OWN_NODE_SELECTOR = '.fblk-ph, .fblk-panel-mask, .fblk-bar, .fblk-toast';
+
+  function isOwnMutation(m) {
+    const target = m.target;
+    return target instanceof Element && !!target.closest(OWN_NODE_SELECTOR);
+  }
+
   function startObserving() {
     const observer = new MutationObserver(function (mutations) {
       for (const m of mutations) {
-        if (m.type === 'childList' && (m.addedNodes.length || m.removedNodes.length)) {
-          scheduleSync();
-          return;
-        }
+        if (m.type !== 'childList') continue;
+        if (!m.addedNodes.length && !m.removedNodes.length) continue;
+        if (isOwnMutation(m)) continue;
+        scheduleSync();
+        return;
       }
     });
     observer.observe(document.body, { childList: true, subtree: true });
